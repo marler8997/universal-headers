@@ -2,5 +2,10 @@
     .name = "universal-headers",
     .version = "0.0.1",
 
-    .dependencies = .{ },
+    .dependencies = .{
+        .arocc = .{
+            .url = "https://github.com/marler8997/arocc/archive/765d251e29771278e23dfde3695107f1b2e7bbaf.tar.gz",
+            .hash = "1220fbf3b14788952616599f6ba544224ede4757d0ba2c7cc348b22a1eae0fbb7b4c",
+        },
+    },
 }

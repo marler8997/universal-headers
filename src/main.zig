@@ -424,7 +424,7 @@ fn parseHeaderIntoGraph(arena: Allocator, h_path: []const u8, header: Header, sy
 }
 
 /// Convert a token from the Tokenizer into a token used by the parser.
-fn tokFromRaw(raw: RawToken) Token {
+pub fn tokFromRaw(raw: RawToken) Token {
     return .{
         .id = raw.id,
         .loc = .{
@@ -436,14 +436,14 @@ fn tokFromRaw(raw: RawToken) Token {
 }
 
 // Skip until newline, ignore other tokens.
-fn skipToNl(tokenizer: *Tokenizer) void {
+pub fn skipToNl(tokenizer: *Tokenizer) void {
     while (true) {
         const tok = tokenizer.next();
         if (tok.id == .nl or tok.id == .eof) return;
     }
 }
 
-fn handleKeywordDefine(arena: Allocator, source: arocc.Source, nodes: *std.ArrayList(Node), tokenizer: *Tokenizer) !void {
+pub fn handleKeywordDefine(arena: Allocator, source: arocc.Source, nodes: *std.ArrayList(Node), tokenizer: *Tokenizer) !void {
     // We want to extract two things:
     // 1. the macro identifier name.
     // 2. the source code for the macro, with whitespace stripped.

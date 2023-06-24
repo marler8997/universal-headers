@@ -25,16 +25,36 @@ the creation and maintenance of those files.
 
 ## Strategy
 
-When files are very different, the idea is to keep the different files in
-subdirectories and use the preprocessor to `#include` them as appropriate
-depending on target information.
+C headers can be broken down into these fundamental operations:
 
-When files are very similar, the idea is to edit the files so that different
-targets share the same files, and the preprocessor is used to contain the
-differences between targets.
+    1. Define (or Undefine) preprocessor macro symbols
+    2. Define types
+    3. Define functions
+    4. Provide (or don't provide) content for #include <PATH> or #include "PATH"
 
-This will require carefully backporting changes if any of the libcs change
-upstream.
+This set of operations gives us the criteria we need to verify our universal headers
+are correct. Namely,
+
+    is the set of macros/types/functions the same after every "include" directive
+    between the universal headers and the original?
+
+As far as I know, a tool that can verify this criteria doesn't exist yet.  Trying
+to leverage existing C toolchains for this would require introspection into the
+compiler state which I've never heard of, but, I don't think it would take much
+effort to create a tool for this based on arocc.
+
+I'd like to test our universal headers behave exactly the same as the original
+leveraging existing build tools.  To do this, we can create a C compiler wrapper
+that will forward the command to a real C compiler, but before doing so, also processes
+the file and exports this compiler state.
+
+### Provide (or don't provide) content for #include <PATH> or #include "PATH"
+
+Toolchains control this behavior with the existence of files within an
+include directory.  For universal headers, one strategy is to include every
+possible file and emulate non-existence by leveraging `#include_next`.
+
+## Stuff to save from original strategy section
 
 Some preprocessor defines are already present to communicate the target; for
 example the presence of `_WIN32` can be used to detect the Windows operating
