@@ -6,7 +6,7 @@
 // TODO: probably require a "--" so options can be specified?
 const builtin = @import("builtin");
 const std = @import("std");
-const arocc = @import("arocc");
+const aro = @import("aro");
 const lib = @import("main.zig");
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -269,6 +269,38 @@ fn hasNonWhitespace(s: []const u8) bool {
     return false;
 }
 
+const FilePart = struct {
+    marker: LineMarker,
+    start: usize,
+    end: usize,
+};
+fn splitFiles(src: []const u8, parts: *std.ArrayList(FilePart), opt: struct {
+    filter_empty_sections: bool = true,
+}) !void {
+    var last_file_offset: usize = 0;
+    var last_marker_opt: ?LineMarker = null;
+
+    var line_it = std.mem.split(u8, src, "\n");
+    while (line_it.next()) |line_full| {
+        const line = std.mem.trimRight(u8, line_full, "\r");
+        if (!std.mem.startsWith(u8, line, "#")) continue;
+
+        const line_file_offset = @intFromPtr(line.ptr) - @intFromPtr(src.ptr);
+        const last_section_start = last_file_offset;
+        const last_section_end = line_file_offset;
+        last_file_offset = @min(src.len, line_file_offset + line_full.len + 1);
+
+        if (last_marker_opt) |m| {
+            if (!opt.filter_empty_sections or hasNonWhitespace(src[last_section_start..last_section_end])) {
+                parts.append(FilePart{ .marker = m, .start = last_section_start, .end = last_section_end}) catch |e| oom(e);
+            }
+        } else {
+            if (last_section_end != last_section_start) @panic("content from unmarked location, is this possible?");
+        }
+        last_marker_opt = try parseLineMarker(line);
+    }
+}
+
 fn analyze(
     cc_options: []const []const u8,
     target: std.Target,
@@ -298,37 +330,69 @@ fn analyze(
     };
     defer arena.free(src);
 
+    var parts = std.ArrayList(FilePart).init(arena);
+    defer parts.deinit();
+    try splitFiles(src, &parts, .{.filter_empty_sections = false });
+
+    if (parts.items.len == 0) {
+        std.log.err("{s}: no line markers", .{preprocessed_filename});
+        return error.UnexpectedPreprocessorOutput;
+    }
+
     {
-        var last_file_offset: usize = 0;
-        var last_marker_opt: ?LineMarker = null;
+        const first = parts.items[0];
+        if (!std.mem.eql(u8, original_filename, first.marker.filename)) {
+            std.log.err("{s}: expected first line marker to be file '{s}' but got '{s}'", .{
+                preprocessed_filename,
+                original_filename,
+                first.marker.filename,
+            });
+            return error.UnexpectedPreprocessorOutput;
+        }
+    }
 
-        var line_it = std.mem.split(u8, src, "\n");
-        while (line_it.next()) |line_full| {
-            const line = std.mem.trimRight(u8, line_full, "\r");
-            if (!std.mem.startsWith(u8, line, "#")) continue;
-
-            const line_file_offset = @intFromPtr(line.ptr) - @intFromPtr(src.ptr);
-            const last_section_content = src[last_file_offset .. line_file_offset];
-            last_file_offset = @min(src.len, line_file_offset + line_full.len + 1);
-
-            if (hasNonWhitespace(last_section_content)) {
-                const m = last_marker_opt orelse @panic("content from unmarked location, is this possible?");
-                try report_writer.writeAll("// --------------------------------------------------------------------------------\n");
-                try report_writer.print(
-                    "// {s}(new={}, system={}, extern-c={}): line {}\n",
-                    .{m.filename, m.new_file, m.system_header, m.extern_c, m.line_num},
-                );
-                try report_writer.writeAll("// --------------------------------------------------------------------------------\n");
-                try report_writer.writeAll(last_section_content);
-                if (!std.mem.endsWith(u8, last_section_content, "\n")) {
-                    try report_writer.writeAll("\n");
-                }
+    const dump_original = false;
+    if (dump_original) {
+        for (parts.items) |part| {
+            const m = &part.marker;
+            try report_writer.writeAll("// --------------------------------------------------------------------------------\n");
+            try report_writer.print(
+                "// {s}(new={}, system={}, extern-c={}): line {}\n",
+                .{m.filename, m.new_file, m.system_header, m.extern_c, m.line_num},
+            );
+            try report_writer.writeAll("// --------------------------------------------------------------------------------\n");
+            const content = src[part.start..part.end];
+            try report_writer.writeAll(content);
+            if (!std.mem.endsWith(u8, content, "\n")) {
+                try report_writer.writeAll("\n");
             }
-            last_marker_opt = try parseLineMarker(line);
         }
     }
 
     _ = target;
+    var analyzer = CAnalyzer.init(arena);
+    for (parts.items) |part| {
+        const content = src[part.start..part.end];
+
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // TODO: also dump final state?
+        if (std.mem.eql(u8, part.marker.filename, original_filename)) {
+            try report_writer.print("line: {}\n", .{part.marker.line_num});
+            try reportState(report_writer, try analyzer.getState());
+            try report_writer.print("--------------------------------------------------------------------------------\n", .{});
+        }
+
+        if (hasNonWhitespace(content)) {
+            //const suffix: []const u8 = if (part.marker.returning_to_file) "-returning" else "";
+            //const path = std.fmt.allocPrint(arena, "{s}-line-{}{s}", .{part.marker.filename, part.marker.line_num, suffix}) catch |e| oom(e);
+            //defer arena.free(path);
+            try analyzer.feed(content);
+        }
+    }
+    {
+        try report_writer.print("final_state:\n", .{});
+        try reportState(report_writer, try analyzer.getState());
+    }
 
 //    //fn parseHeaderIntoGraph(arena: Allocator, h_path: []const u8, header: Header, sys_include: []const u8) !Graph {
 //    //var nodes = std.ArrayList(Node).init(arena);
@@ -477,4 +541,91 @@ fn analyze(
 //            },
 //        }
 //    }
+}
+
+fn reportState(report_writer: anytype, state: CAnalyzer.State) !void{
+    try report_writer.print("extern_c: {}\n", .{state.extern_c});
+    for (state.defs) |def| {
+        try report_writer.print("def: {any}\n", .{def});
+    }
+}
+
+const CAnalyzer = struct {
+    allocator: std.mem.Allocator,
+    comp: *aro.Compilation,
+    sources: std.ArrayListUnmanaged(aro.Source) = .{},
+    feed_count: u32 = 0,
+
+    pub fn init(allocator: std.mem.Allocator) CAnalyzer {
+        const comp = allocator.create(aro.Compilation) catch |e| oom(e);
+        comp.* = aro.Compilation.init(allocator);
+        return .{
+            .allocator = allocator,
+            .comp = comp,
+        };
+    }
+    pub fn deinit(self: *CAnalyzer) void {
+        self.sources.deinit(self.allocator);
+        self.comp.deinit();
+        self.allocator.destroy(self.comp);
+        self.* = undefined;
+    }
+
+    pub fn feed(self: *CAnalyzer, c_source: []const u8) !void {
+        var path_buf: [100]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{}", .{self.feed_count});
+        self.feed_count += 1;
+        std.debug.assert(!self.comp.sources.contains(path));
+        self.sources.append(self.allocator, try self.comp.addSourceFromBuffer(path, c_source)) catch |e| oom(e);
+    }
+
+    const Definition = struct {
+        placeholder: u32,
+    };
+    pub const State = struct {
+        extern_c: bool,
+        defs: []const Definition,
+    };
+    pub fn getState(self: *CAnalyzer) !State {
+        //std.log.info("getState --------------------------------------------------------------------------------", .{});
+        var pp = aro.Preprocessor.init(self.comp);
+        defer pp.deinit();
+
+        // TODO: estimate initial tokens capacity
+        // pp.tokens.ensureTotalCapcity
+
+        for (self.sources.items) |source| {
+            var tokenizer = aro.Tokenizer{
+                .buf = source.buf,
+                .comp = self.comp,
+                .source = source.id,
+            };
+            while (true) {
+                var tok = tokenizer.next();
+                if (tok.id == .eof) break;
+                //std.log.info("token '{any}'", .{tok});
+                pp.tokens.append(self.allocator, tokFromRaw(tok)) catch |e| oom(e);
+            }
+        }
+        pp.tokens.append(self.allocator, .{
+            .id = .eof,
+            .loc = .{ },
+        }) catch |e| oom(e);
+        //std.log.info("parsing --------------------------------------------------------------------------------", .{});
+        //var tree = try aro.Parser.parse(&pp);
+        //defer tree.deinit();
+
+        return State{ .extern_c = false, .defs = &.{} };
+    }
+};
+
+fn tokFromRaw(raw: aro.Tokenizer.Token) aro.Tree.Token {
+    return .{
+        .id = raw.id,
+        .loc = .{
+            .id = raw.source,
+            .byte_offset = raw.start,
+            .line = raw.line,
+        },
+    };
 }

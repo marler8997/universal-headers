@@ -34,6 +34,6 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = optimize,
     });
-    analyzer_exe.addModule("arocc", arocc_dep.module("aro"));
+    analyzer_exe.addModule("aro", arocc_dep.module("aro"));
     b.installArtifact(analyzer_exe);
 }
